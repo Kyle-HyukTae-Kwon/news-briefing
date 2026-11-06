@@ -87,6 +87,10 @@ def fetch_all_articles(settings: dict) -> list[dict]:
                 description = item.findtext("description", default="").strip()
                 pub_date_raw = item.findtext("pubDate", default="").strip()
 
+                # 기사 제목 중에 [포토] 들어간 기사는 제외
+                if "[포토]" in title:
+                    continue
+
                 if not link or link in seen_links:
                     continue
                 seen_links.add(link)
@@ -153,24 +157,25 @@ def filter_and_select_top5(articles: list[dict], keywords: list[str]) -> list[di
 def summarize_with_gemini(api_key: str, title: str, description: str) -> str:
     """
     지정된 요약 프롬프트 규칙에 따라 Gemini로 세 줄 요약을 생성합니다.
-    API 키가 없거나 실패하더라도 안전한 대체 텍스트를 반환합니다.
+    - '자세한 내용은 원문 확인 필요' 문구는 포함하지 않습니다.
+    - API 키가 없거나 실패하더라도 안전한 대체 텍스트를 반환합니다.
     """
     # 1. API 키가 없는 경우
     if not api_key:
         fallback = [
             f"- {title}",
-            f"- {description[:60]}..." if description else "- 기사 소개문 없음",
-            "- 자세한 내용은 원문 확인 필요"
+            f"- {description[:60]}..." if description else "- 기사 내용 요약 준비 중입니다.",
+            "- 금융·경제 관련 주요 뉴스입니다."
         ]
         return "\n".join(fallback)
 
     # 2. Gemini 요청 프롬프트 구성
     clean_desc = description.strip() if description else "소개문 내용 없음"
     prompt = (
-        "아래 기사 정보만 보고 한국어로 세 줄 요약을 써 줘.\n"
-        "- 각 줄은 한 문장, 줄 앞에 \"- \" 를 붙인다\n"
-        "- 기사 정보에 없는 내용, 숫자, 이름은 절대 쓰지 않는다\n"
-        "- 정보가 부족하면 마지막 줄에 \"- 자세한 내용은 원문 확인 필요\" 라고 쓴다\n\n"
+        "아래 기사 정보만 보고 한국어로 핵심 내용을 세 줄 요약해 줘.\n"
+        "- 각 줄은 한 문장이어야 하며, 줄 앞에 반드시 \"- \" 를 붙인다\n"
+        "- 기사 정보에 없는 내용, 숫자, 이름은 절대 추측하거나 지어내지 않는다\n"
+        "- '자세한 내용은 원문 확인 필요' 같은 메타 문구는 절대 쓰지 말고, 기사 내용의 핵심만을 작성한다\n\n"
         f"[기사 정보]\n"
         f"제목: {title}\n"
         f"소개문: {clean_desc}"
@@ -195,13 +200,19 @@ def summarize_with_gemini(api_key: str, title: str, description: str) -> str:
         with urllib.request.urlopen(req, timeout=15) as response:
             res_data = json.loads(response.read().decode("utf-8"))
             summary_text = res_data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            return summary_text
+
+            # '원문 확인 필요' 문구가 혹시라도 포함되어 있으면 제거
+            filtered_lines = [
+                line for line in summary_text.split("\n")
+                if "원문 확인 필요" not in line and line.strip()
+            ]
+            return "\n".join(filtered_lines)
     except Exception as e:
         print(f"      ⚠️ 요약 실패 ({e}): 기본 내용으로 대체합니다.")
         fallback = [
             f"- {title}",
-            f"- {clean_desc[:60]}..." if clean_desc != "소개문 내용 없음" else "- 상세 소개 정보 부족",
-            "- 자세한 내용은 원문 확인 필요"
+            f"- {clean_desc[:60]}..." if clean_desc != "소개문 내용 없음" else "- 기사 상세 내용입니다.",
+            "- 금융 및 경제 분야 소식입니다."
         ]
         return "\n".join(fallback)
 
