@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>데일리 뉴스 브리핑 TOP 5</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --card-border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #38bdf8;
+      --badge-kw-bg: rgba(56, 189, 248, 0.15);
+      --badge-kw-text: #38bdf8;
+      --badge-norm-bg: rgba(148, 163, 184, 0.15);
+      --badge-norm-text: #94a3b8;
+      --source-bg: #334155;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      padding: 2rem 1rem;
+    }
+    .container {
+      max-width: 860px;
+      margin: 0 auto;
+    }
+    header {
+      margin-bottom: 2rem;
+      text-align: center;
+      border-bottom: 1px solid var(--card-border);
+      padding-bottom: 1.5rem;
+    }
+    header h1 {
+      font-size: 2rem;
+      font-weight: 800;
+      color: var(--text);
+      margin-bottom: 0.5rem;
+    }
+    .meta-bar {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: center;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+    }
+    .keyword-pill {
+      background: var(--badge-kw-bg);
+      color: var(--badge-kw-text);
+      padding: 0.15rem 0.6rem;
+      border-radius: 9999px;
+      font-weight: 600;
+    }
+    .news-list {
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+    .news-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+    .news-card:hover {
+      transform: translateY(-2px);
+      border-color: var(--primary);
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.75rem;
+    }
+    .source-tag {
+      background: var(--source-bg);
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 0.2rem 0.5rem;
+      border-radius: 6px;
+    }
+    .rank-tag {
+      font-size: 0.75rem;
+      font-weight: 800;
+      color: var(--primary);
+    }
+    .card-title {
+      font-size: 1.2rem;
+      font-weight: 700;
+      margin-bottom: 0.8rem;
+      line-height: 1.4;
+    }
+    .card-title a {
+      color: var(--text);
+      text-decoration: none;
+    }
+    .card-title a:hover {
+      color: var(--primary);
+      text-decoration: underline;
+    }
+    .ai-box {
+      background: rgba(15, 23, 42, 0.6);
+      border-left: 3px solid var(--primary);
+      padding: 0.75rem 1rem;
+      border-radius: 0 8px 8px 0;
+      margin-bottom: 1rem;
+    }
+    .ai-label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: var(--primary);
+      display: block;
+      margin-bottom: 0.25rem;
+    }
+    .card-desc {
+      color: #cbd5e1;
+      font-size: 0.95rem;
+    }
+    .card-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      padding-top: 0.75rem;
+    }
+    .tags-container {
+      display: flex;
+      gap: 0.4rem;
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .badge-kw {
+      background: var(--badge-kw-bg);
+      color: var(--badge-kw-text);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+    }
+    .badge-normal {
+      background: var(--badge-norm-bg);
+      color: var(--badge-norm-text);
+    }
+    .date-container {
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>📰 데일리 뉴스 브리핑 TOP 5</h1>
+      <div class="meta-bar">
+        <span>🕒 수집 일시: <strong>2026-11-06 21:03:42</strong></span>
+        <span>🏷️ 감지 키워드: <span class="keyword-pill">은행, ai, 금융</span></span>
+      </div>
+    </header>
+    <main class="news-list">
+      
+        <article class="news-card">
+          <div class="card-header">
+            <span class="source-tag">한국경제 경제</span>
+            <span class="rank-tag">TOP 1</span>
+          </div>
+          <h2 class="card-title">
+            <a href="https://www.hankyung.com/article/2026110615191" target="_blank" rel="noopener noreferrer">&quot;모든 것이 AI인 시대, 생존의 조건은 인재&quot;…교수·CEO도 열공</a>
+          </h2>
+          <div class="ai-box">
+            <span class="ai-label">🤖 Gemini 핵심 요약</span>
+            <p class="card-desc">AI 중심의 산업 변화 속에서 생존과 성장을 위해 교수와 최고경영자(CEO)들까지 인재 확보와 AI 역량 강화에 사활을 걸고 있습니다.</p>
+          </div>
+          <div class="card-footer">
+            <div class="tags-container"><span class="badge badge-kw">#ai</span></div>
+            <div class="date-container">🕒 2026-11-06 17:40</div>
+          </div>
+        </article>
+        
+        <article class="news-card">
+          <div class="card-header">
+            <span class="source-tag">매일경제 경제</span>
+            <span class="rank-tag">TOP 2</span>
+          </div>
+          <h2 class="card-title">
+            <a href="https://www.mk.co.kr/news/economy/12200714" target="_blank" rel="noopener noreferrer">[포토] 우리금융, MSCI와 기후금융 논의</a>
+          </h2>
+          <div class="ai-box">
+            <span class="ai-label">🤖 Gemini 핵심 요약</span>
+            <p class="card-desc">우리금융그룹이 글로벌 지수 산출기관인 MSCI와 만나 기후변화 대응을 위한 금융 협력 방안을 논의했습니다.</p>
+          </div>
+          <div class="card-footer">
+            <div class="tags-container"><span class="badge badge-kw">#금융</span></div>
+            <div class="date-container">🕒 2026-11-06 17:40</div>
+          </div>
+        </article>
+        
+        <article class="news-card">
+          <div class="card-header">
+            <span class="source-tag">매일경제 경제</span>
+            <span class="rank-tag">TOP 3</span>
+          </div>
+          <h2 class="card-title">
+            <a href="https://www.mk.co.kr/news/economy/12200712" target="_blank" rel="noopener noreferrer">금융사 부실 막을 &#x27;자금 수혈&#x27; 안전망 만든다</a>
+          </h2>
+          <div class="ai-box">
+            <span class="ai-label">🤖 Gemini 핵심 요약</span>
+            <p class="card-desc">금융당국이 금융회사의 부실을 사전에 차단하기 위한 선제적 자금 지원 제도인 &#x27;금융안정계정&#x27; 도입을 적극 추진하고 있습니다.</p>
+          </div>
+          <div class="card-footer">
+            <div class="tags-container"><span class="badge badge-kw">#금융</span></div>
+            <div class="date-container">🕒 2026-11-06 17:40</div>
+          </div>
+        </article>
+        
+        <article class="news-card">
+          <div class="card-header">
+            <span class="source-tag">매일경제 경제</span>
+            <span class="rank-tag">TOP 4</span>
+          </div>
+          <h2 class="card-title">
+            <a href="https://www.mk.co.kr/news/economy/12200713" target="_blank" rel="noopener noreferrer">&#x27;대한민국 나눔국민대상&#x27;…신한금융, 대통령 표창</a>
+          </h2>
+          <div class="ai-box">
+            <span class="ai-label">🤖 Gemini 핵심 요약</span>
+            <p class="card-desc">신한금융그룹이 나눔 문화 확산에 기여한 공로를 인정받아 &#x27;대한민국 나눔국민대상&#x27;에서 대통령 표창을 수상했습니다.</p>
+          </div>
+          <div class="card-footer">
+            <div class="tags-container"><span class="badge badge-kw">#금융</span></div>
+            <div class="date-container">🕒 2026-11-06 17:40</div>
+          </div>
+        </article>
+        
+        <article class="news-card">
+          <div class="card-header">
+            <span class="source-tag">매일경제 경제</span>
+            <span class="rank-tag">TOP 5</span>
+          </div>
+          <h2 class="card-title">
+            <a href="https://www.mk.co.kr/news/economy/12200611" target="_blank" rel="noopener noreferrer">“변동성 확대시 추가조치” F4회의 이어 ‘내수 촉진’ 현장 찾은 이형일</a>
+          </h2>
+          <div class="ai-box">
+            <span class="ai-label">🤖 Gemini 핵심 요약</span>
+            <p class="card-desc">이형일 차관이 미 대선 여파로 인한 시장 변동성에 대응함과 동시에, 내수 활성화를 통한 경제 회복 의지를 강조하며 현장 행보를 이어갔습니다.</p>
+          </div>
+          <div class="card-footer">
+            <div class="tags-container"><span class="badge badge-kw">#ai</span></div>
+            <div class="date-container">🕒 2026-11-06 17:07</div>
+          </div>
+        </article>
+        
+    </main>
+  </div>
+</body>
+</html>
