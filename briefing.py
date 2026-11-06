@@ -1,11 +1,10 @@
 """
 [briefing.py]
-settings.json에 등록된 RSS 피드에서 뉴스를 수집하여,
-키워드(은행, ai, 금융)가 포함된 기사를 우선적으로 최대 5개 선별하고,
-.env 파일의 Gemini API 키를 활용하여 5개 기사를 1회 초고속 일괄 AI 요약한 뒤
-news.json, briefing.md, index.html로 저장하는 완성형 스크립트입니다.
+settings.json에 등록된 RSS 피드에서 뉴스를 수집하고,
+Gemini API를 호출하여 각 기사마다 '세 줄 요약'을 생성한 뒤
+index.html 및 news.json 결과물을 생성하는 스크립트입니다.
 
-외부 패키지 설치(pip) 없이 Python 표준 라이브러리만 사용합니다.
+외부 패키지 설치 없이 Python 기본 내장 모듈만 사용합니다.
 """
 
 from datetime import datetime
@@ -27,20 +26,20 @@ def load_env_api_key(env_path: Path) -> str:
     if not env_path.exists():
         return os.environ.get("GEMINI_API_KEY", "")
 
-    with open(env_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("GEMINI_API_KEY="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("GEMINI_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
     return os.environ.get("GEMINI_API_KEY", "")
 
 
 def parse_pubdate(pubdate_str: str) -> tuple[datetime, str]:
     """
-    RSS 날짜 문자열(RFC 2822 형식)을 읽어서:
-    1. 정렬을 위한 datetime 객체 (비교 가능하도록 offset-naive로 통일)
-    2. 사람이 보기 편한 'YYYY-MM-DD HH:MM' 문자열
-    두 가지를 튜플로 반환합니다.
+    RSS 날짜 문자열(RFC 2822)을 정렬용 datetime과 사람이 읽기 편한 문자열로 변환합니다.
     """
     if not pubdate_str:
         return datetime.min, ""
@@ -56,9 +55,8 @@ def parse_pubdate(pubdate_str: str) -> tuple[datetime, str]:
 
 def fetch_all_articles(settings: dict) -> list[dict]:
     """
-    settings.json에 등록된 모든 RSS 피드 주소에 접속하여
-    기사 목록(제목, 링크, 소개문, 날짜, 언론사)을 수집합니다.
-    (기사 본문 웹페이지는 스크래핑하지 않고 RSS 요약 정보만 수집)
+    settings.json의 모든 RSS 피드에서 기사 목록을 수집합니다.
+    (기사 본문 웹페이지는 스크래핑하지 않고 RSS 피드 정보만 사용)
     """
     feeds = settings.get("feeds", [])
     headers = {
@@ -100,43 +98,38 @@ def fetch_all_articles(settings: dict) -> list[dict]:
                     "title": title,
                     "link": link,
                     "description": description,
-                    "pub_date_raw": pub_date_raw,
                     "dt": dt_obj,
                     "date": formatted_date
                 })
 
         except Exception as e:
-            print(f"[{feed_name}] RSS 수집 중 오류: {e}")
+            print(f"[{feed_name}] RSS 수집 오류: {e}")
 
     return all_articles
 
 
 def filter_and_select_top5(articles: list[dict], keywords: list[str]) -> list[dict]:
     """
-    1. 제목 또는 소개문에 키워드(은행, ai, 금융)가 들어간 기사를 찾습니다.
-    2. 키워드가 걸린 기사를 최신순으로 우선 배치합니다.
-    3. 5개가 되지 않으면 키워드가 없는 일반 최신 기사로 채워 최대 5개를 만듭니다.
+    제목이나 소개문에 키워드(은행, ai, 금융)가 포함된 기사를 우선 선별하고,
+    부족하면 일반 최신 기사로 채워 최대 5개를 선택합니다.
     """
     keyword_articles = []
     other_articles = []
-
     lower_keywords = [k.lower() for k in keywords]
 
     for art in articles:
         search_target = f"{art['title']} {art['description']}".lower()
-
         matched = [
             orig_kw for orig_kw, low_kw in zip(keywords, lower_keywords)
             if low_kw in search_target
         ]
-
-        art_with_kw = dict(art)
-        art_with_kw["matched_keywords"] = matched
+        art_copy = dict(art)
+        art_copy["matched_keywords"] = matched
 
         if matched:
-            keyword_articles.append(art_with_kw)
+            keyword_articles.append(art_copy)
         else:
-            other_articles.append(art_with_kw)
+            other_articles.append(art_copy)
 
     keyword_articles.sort(key=lambda x: x["dt"], reverse=True)
     other_articles.sort(key=lambda x: x["dt"], reverse=True)
@@ -157,36 +150,41 @@ def filter_and_select_top5(articles: list[dict], keywords: list[str]) -> list[di
     return clean_results
 
 
-def summarize_all_with_gemini(api_key: str, articles: list[dict]):
+def summarize_with_gemini(api_key: str, title: str, description: str) -> str:
     """
-    선별된 5개 기사를 1회의 Gemini API 호출로 초고속 일괄 요약합니다.
-    (네트워크 호출 최소화 및 타임아웃 방지)
+    지정된 요약 프롬프트 규칙에 따라 Gemini로 세 줄 요약을 생성합니다.
+    API 키가 없거나 실패하더라도 안전한 대체 텍스트를 반환합니다.
     """
-    if not api_key or not articles:
-        for art in articles:
-            art["ai_summary"] = art["description"] or "요약 없음"
-        return
+    # 1. API 키가 없는 경우
+    if not api_key:
+        fallback = [
+            f"- {title}",
+            f"- {description[:60]}..." if description else "- 기사 소개문 없음",
+            "- 자세한 내용은 원문 확인 필요"
+        ]
+        return "\n".join(fallback)
+
+    # 2. Gemini 요청 프롬프트 구성
+    clean_desc = description.strip() if description else "소개문 내용 없음"
+    prompt = (
+        "아래 기사 정보만 보고 한국어로 세 줄 요약을 써 줘.\n"
+        "- 각 줄은 한 문장, 줄 앞에 \"- \" 를 붙인다\n"
+        "- 기사 정보에 없는 내용, 숫자, 이름은 절대 쓰지 않는다\n"
+        "- 정보가 부족하면 마지막 줄에 \"- 자세한 내용은 원문 확인 필요\" 라고 쓴다\n\n"
+        f"[기사 정보]\n"
+        f"제목: {title}\n"
+        f"소개문: {clean_desc}"
+    )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={api_key}"
 
-    items_text = []
-    for idx, art in enumerate(articles, start=1):
-        desc = art["description"] if art["description"] else "상세 본문 요약 없음"
-        items_text.append(f"[{idx}] 제목: {art['title']}\n    소개: {desc}")
-
-    prompt = (
-        "당신은 금융/경제 뉴스 브리핑 전문가입니다. 아래 제공된 5개 기사의 핵심 내용을 바쁜 현대인을 위해 "
-        "각각 1~2문장의 친절하고 명확한 한국어로 요약해 주세요.\n"
-        "반드시 기사 순서대로 요약 문자열만을 담은 JSON 문자열 배열 형식으로만 응답해 주세요.\n"
-        "예시 포맷: [\"1번 요약문\", \"2번 요약문\", \"3번 요약문\", \"4번 요약문\", \"5번 요약문\"]\n\n"
-        + "\n\n".join(items_text)
-    )
-
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json"}
+        "contents": [
+            {"parts": [{"text": prompt}]}
+        ]
     }
 
+    # 3. HTTP 요청 및 응답 처리
     try:
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
@@ -194,94 +192,68 @@ def summarize_all_with_gemini(api_key: str, articles: list[dict]):
             data=data,
             headers={"Content-Type": "application/json"}
         )
-        with urllib.request.urlopen(req, timeout=25) as response:
+        with urllib.request.urlopen(req, timeout=15) as response:
             res_data = json.loads(response.read().decode("utf-8"))
-            raw_text = res_data["candidates"][0]["content"]["parts"][0]["text"]
-            summaries = json.loads(raw_text)
-
-            for idx, art in enumerate(articles):
-                if idx < len(summaries) and summaries[idx]:
-                    art["ai_summary"] = summaries[idx].strip()
-                else:
-                    art["ai_summary"] = art["description"] or "요약 없음"
-            print("   -> 5개 기사 Gemini 일괄 요약 완료!")
+            summary_text = res_data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            return summary_text
     except Exception as e:
-        print(f"   ⚠️ 일괄 요약 실패(기본 소개문 사용): {e}")
-        for art in articles:
-            art["ai_summary"] = art["description"] or "요약 없음"
+        print(f"      ⚠️ 요약 실패 ({e}): 기본 내용으로 대체합니다.")
+        fallback = [
+            f"- {title}",
+            f"- {clean_desc[:60]}..." if clean_desc != "소개문 내용 없음" else "- 상세 소개 정보 부족",
+            "- 자세한 내용은 원문 확인 필요"
+        ]
+        return "\n".join(fallback)
 
 
-def save_markdown_report(output_path: Path, keywords: list[str], articles: list[dict]):
+def generate_index_html(output_path: Path, articles: list[dict], collected_time_str: str):
     """
-    선별된 기사들을 깔끔한 마크다운(.md) 보고서 파일로 저장합니다.
+    사용자 요구사항에 맞춘 index.html 생성:
+    - 제목: '금융·경제 아침 브리핑'
+    - 맨 위에: 수집 시각
+    - 기사마다: 제목, 세 줄 요약, 언론사 이름, 원문 링크
+    - 맨 아래에: 'AI 요약은 틀릴 수 있음' 표시
+    - 키가 없거나 실패해도 정상 표시
     """
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    lines = [
-        "# 📰 데일리 뉴스 브리핑 TOP 5 (with Gemini AI)",
-        "",
-        f"- **생성 일시**: {now_str}",
-        f"- **타깃 키워드**: `{', '.join(keywords)}`",
-        "",
-        "---",
-        ""
-    ]
-
-    for idx, art in enumerate(articles, start=1):
-        if art["matched_keywords"]:
-            kw_tags = " ".join([f"`#{kw}`" for kw in art["matched_keywords"]])
-        else:
-            kw_tags = "`#최신기사`"
-
-        lines.append(f"### {idx}. [{art['title']}]({art['link']})")
-        lines.append(f"- **출처**: {art['source']} | **발행일**: {art['date']}")
-        lines.append(f"- **키워드**: {kw_tags}")
-        ai_sum = art.get("ai_summary", art["description"])
-        if ai_sum:
-            lines.append(f"- **🤖 Gemini 핵심 요약**: {ai_sum}")
-        lines.append("")
-
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-
-
-def save_html_dashboard(output_path: Path, keywords: list[str], articles: list[dict]):
-    """
-    더블 클릭만으로 브라우저에서 볼 수 있는 모던한 반응형 HTML 카드 대시보드를 생성합니다.
-    """
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     cards_html = ""
     for idx, art in enumerate(articles, start=1):
         safe_title = html.escape(art["title"])
-        summary_text = art.get("ai_summary") or art.get("description") or "요약 없음"
-        safe_desc = html.escape(summary_text)
-        safe_link = html.escape(art["link"])
         safe_source = html.escape(art["source"])
+        safe_link = html.escape(art["link"])
         safe_date = html.escape(art["date"])
 
-        tags_html = ""
-        if art["matched_keywords"]:
-            for kw in art["matched_keywords"]:
-                tags_html += f'<span class="badge badge-kw">#{html.escape(kw)}</span>'
-        else:
-            tags_html = '<span class="badge badge-normal">#최신</span>'
+        # 세 줄 요약 줄바꿈 분리 및 HTML 리스트 처리
+        raw_summary = art.get("three_line_summary", "")
+        summary_lines = [line.strip() for line in raw_summary.split("\n") if line.strip()]
+
+        summary_items_html = ""
+        for line in summary_lines:
+            # "- " 접두어가 있다면 제거 후 깔끔한 li 태그로 표시
+            display_line = line[2:].strip() if line.startswith("- ") else line
+            summary_items_html += f"<li>{html.escape(display_line)}</li>\n"
 
         cards_html += f"""
         <article class="news-card">
-          <div class="card-header">
-            <span class="source-tag">{safe_source}</span>
-            <span class="rank-tag">TOP {idx}</span>
+          <div class="card-meta">
+            <span class="source-badge">{safe_source}</span>
+            <span class="date-text">{safe_date}</span>
           </div>
-          <h2 class="card-title">
+
+          <h2 class="article-title">
             <a href="{safe_link}" target="_blank" rel="noopener noreferrer">{safe_title}</a>
           </h2>
-          <div class="ai-box">
-            <span class="ai-label">🤖 Gemini 핵심 요약</span>
-            <p class="card-desc">{safe_desc}</p>
+
+          <div class="summary-container">
+            <div class="summary-label">📋 세 줄 요약</div>
+            <ul class="summary-list">
+              {summary_items_html}
+            </ul>
           </div>
+
           <div class="card-footer">
-            <div class="tags-container">{tags_html}</div>
-            <div class="date-container">🕒 {safe_date}</div>
+            <a class="origin-btn" href="{safe_link}" target="_blank" rel="noopener noreferrer">
+              원문 기사 보기 →
+            </a>
           </div>
         </article>
         """
@@ -291,173 +263,182 @@ def save_html_dashboard(output_path: Path, keywords: list[str], articles: list[d
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>데일리 뉴스 브리핑 TOP 5</title>
+  <title>금융·경제 아침 브리핑</title>
   <style>
     :root {{
-      --bg: #0f172a;
-      --card-bg: #1e293b;
-      --card-border: #334155;
-      --text: #f8fafc;
-      --text-muted: #94a3b8;
-      --primary: #38bdf8;
-      --badge-kw-bg: rgba(56, 189, 248, 0.15);
-      --badge-kw-text: #38bdf8;
-      --badge-norm-bg: rgba(148, 163, 184, 0.15);
-      --badge-norm-text: #94a3b8;
-      --source-bg: #334155;
+      --bg-color: #f8fafc;
+      --card-bg: #ffffff;
+      --border-color: #e2e8f0;
+      --text-main: #0f172a;
+      --text-muted: #64748b;
+      --primary-color: #0284c7;
+      --primary-light: #e0f2fe;
+      --badge-bg: #f1f5f9;
+      --warning-bg: #fffbeb;
+      --warning-text: #b45309;
+      --warning-border: #fde68a;
     }}
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      background: var(--bg);
-      color: var(--text);
+      background-color: var(--bg-color);
+      color: var(--text-main);
       line-height: 1.6;
       padding: 2rem 1rem;
     }}
     .container {{
-      max-width: 860px;
+      max-width: 760px;
       margin: 0 auto;
     }}
     header {{
-      margin-bottom: 2rem;
       text-align: center;
-      border-bottom: 1px solid var(--card-border);
-      padding-bottom: 1.5rem;
+      margin-bottom: 2rem;
+      padding-bottom: 1.25rem;
+      border-bottom: 2px solid var(--border-color);
     }}
     header h1 {{
       font-size: 2rem;
       font-weight: 800;
-      color: var(--text);
+      color: var(--text-main);
       margin-bottom: 0.5rem;
+      letter-spacing: -0.02em;
     }}
-    .meta-bar {{
-      font-size: 0.9rem;
+    .collected-time {{
+      font-size: 0.95rem;
       color: var(--text-muted);
-      display: flex;
-      justify-content: center;
-      gap: 1.5rem;
-      flex-wrap: wrap;
+      font-weight: 500;
     }}
-    .keyword-pill {{
-      background: var(--badge-kw-bg);
-      color: var(--badge-kw-text);
-      padding: 0.15rem 0.6rem;
-      border-radius: 9999px;
-      font-weight: 600;
-    }}
-    .news-list {{
+    .news-feed {{
       display: flex;
       flex-direction: column;
-      gap: 1.25rem;
+      gap: 1.5rem;
     }}
     .news-card {{
       background: var(--card-bg);
-      border: 1px solid var(--card-border);
+      border: 1px solid var(--border-color);
       border-radius: 12px;
       padding: 1.5rem;
-      transition: transform 0.2s ease, border-color 0.2s ease;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
     }}
     .news-card:hover {{
       transform: translateY(-2px);
-      border-color: var(--primary);
+      box-shadow: 0 8px 16px rgba(0, 0, 0, 0.08);
     }}
-    .card-header {{
+    .card-meta {{
       display: flex;
       justify-content: space-between;
       align-items: center;
       margin-bottom: 0.75rem;
     }}
-    .source-tag {{
-      background: var(--source-bg);
-      font-size: 0.75rem;
+    .source-badge {{
+      background: var(--primary-light);
+      color: var(--primary-color);
+      font-size: 0.8rem;
       font-weight: 700;
-      padding: 0.2rem 0.5rem;
+      padding: 0.2rem 0.6rem;
       border-radius: 6px;
     }}
-    .rank-tag {{
-      font-size: 0.75rem;
-      font-weight: 800;
-      color: var(--primary);
+    .date-text {{
+      font-size: 0.85rem;
+      color: var(--text-muted);
     }}
-    .card-title {{
-      font-size: 1.2rem;
+    .article-title {{
+      font-size: 1.25rem;
       font-weight: 700;
-      margin-bottom: 0.8rem;
       line-height: 1.4;
-    }}
-    .card-title a {{
-      color: var(--text);
-      text-decoration: none;
-    }}
-    .card-title a:hover {{
-      color: var(--primary);
-      text-decoration: underline;
-    }}
-    .ai-box {{
-      background: rgba(15, 23, 42, 0.6);
-      border-left: 3px solid var(--primary);
-      padding: 0.75rem 1rem;
-      border-radius: 0 8px 8px 0;
       margin-bottom: 1rem;
     }}
-    .ai-label {{
-      font-size: 0.75rem;
-      font-weight: 700;
-      color: var(--primary);
-      display: block;
-      margin-bottom: 0.25rem;
+    .article-title a {{
+      color: var(--text-main);
+      text-decoration: none;
     }}
-    .card-desc {{
-      color: #cbd5e1;
+    .article-title a:hover {{
+      color: var(--primary-color);
+      text-decoration: underline;
+    }}
+    .summary-container {{
+      background: #f8fafc;
+      border: 1px solid #edf2f7;
+      border-left: 4px solid var(--primary-color);
+      border-radius: 6px;
+      padding: 1rem 1.2rem;
+      margin-bottom: 1rem;
+    }}
+    .summary-label {{
+      font-size: 0.8rem;
+      font-weight: 700;
+      color: var(--primary-color);
+      margin-bottom: 0.5rem;
+    }}
+    .summary-list {{
+      list-style-type: none;
+      padding-left: 0;
+    }}
+    .summary-list li {{
+      position: relative;
+      padding-left: 1.2rem;
+      margin-bottom: 0.4rem;
       font-size: 0.95rem;
+      color: #334155;
+      line-height: 1.5;
+    }}
+    .summary-list li:last-child {{
+      margin-bottom: 0;
+    }}
+    .summary-list li::before {{
+      content: "-";
+      position: absolute;
+      left: 0;
+      color: var(--primary-color);
+      font-weight: bold;
     }}
     .card-footer {{
       display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-      font-size: 0.85rem;
-      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      justify-content: flex-end;
+      border-top: 1px solid var(--border-color);
       padding-top: 0.75rem;
     }}
-    .tags-container {{
-      display: flex;
-      gap: 0.4rem;
-    }}
-    .badge {{
-      display: inline-block;
-      padding: 0.15rem 0.5rem;
-      border-radius: 6px;
-      font-size: 0.75rem;
+    .origin-btn {{
+      font-size: 0.85rem;
       font-weight: 600;
+      color: var(--primary-color);
+      text-decoration: none;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      transition: background-color 0.15s ease;
     }}
-    .badge-kw {{
-      background: var(--badge-kw-bg);
-      color: var(--badge-kw-text);
-      border: 1px solid rgba(56, 189, 248, 0.3);
+    .origin-btn:hover {{
+      background-color: var(--primary-light);
+      text-decoration: underline;
     }}
-    .badge-normal {{
-      background: var(--badge-norm-bg);
-      color: var(--badge-norm-text);
-    }}
-    .date-container {{
-      color: var(--text-muted);
+    footer.disclaimer-box {{
+      margin-top: 3rem;
+      text-align: center;
+      padding: 1rem;
+      background: var(--warning-bg);
+      border: 1px solid var(--warning-border);
+      color: var(--warning-text);
+      font-size: 0.9rem;
+      font-weight: 600;
+      border-radius: 8px;
     }}
   </style>
 </head>
 <body>
   <div class="container">
     <header>
-      <h1>📰 데일리 뉴스 브리핑 TOP 5</h1>
-      <div class="meta-bar">
-        <span>🕒 수집 일시: <strong>{now_str}</strong></span>
-        <span>🏷️ 감지 키워드: <span class="keyword-pill">{', '.join(keywords)}</span></span>
-      </div>
+      <h1>금융·경제 아침 브리핑</h1>
+      <p class="collected-time">수집 시각: {collected_time_str}</p>
     </header>
-    <main class="news-list">
+
+    <main class="news-feed">
       {cards_html}
     </main>
+
+    <footer class="disclaimer-box">
+      ⚠️ AI 요약은 틀릴 수 있음
+    </footer>
   </div>
 </body>
 </html>
@@ -471,18 +452,24 @@ def main():
     settings_path = base_dir / "settings.json"
     env_path = base_dir / ".env"
     json_path = base_dir / "news.json"
-    md_path = base_dir / "briefing.md"
     html_path = base_dir / "index.html"
 
-    # API 키 로드
+    collected_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    print("=" * 60)
+    print(f"🌅 [금융·경제 아침 브리핑] 수집 시작 ({collected_time_str})")
+    print("=" * 60)
+
+    # 1. API 키 불러오기
     api_key = load_env_api_key(env_path)
     if api_key:
-        print("🔑 Gemini API 키 감지 완료 (AI 요약 기능 활성화)")
+        print("🔑 GEMINI_API_KEY 로드 완료")
     else:
-        print("ℹ️ Gemini API 키가 없어 기본 소개문으로 진행합니다.")
+        print("ℹ️ GEMINI_API_KEY 가 없습니다. 기본 요약 텍스트로 대체 생성합니다.")
 
+    # 2. settings.json 읽기
     if not settings_path.exists():
-        print(f"설정 파일({settings_path})이 존재하지 않습니다.")
+        print(f"❌ 설정 파일({settings_path})이 없습니다.")
         return
 
     with open(settings_path, "r", encoding="utf-8") as f:
@@ -490,38 +477,37 @@ def main():
 
     keywords = settings.get("keywords", ["은행", "ai", "금융"])
 
-    print("=" * 60)
-    print("1. 모든 RSS 피드에서 기사 수집 중...")
+    # 3. RSS 피드 수집 및 선별
+    print("\n1. RSS 피드에서 뉴스 수집 중...")
     articles = fetch_all_articles(settings)
-    print(f"   -> 총 {len(articles)}개의 기사를 수집했습니다.")
+    print(f"   -> 전체 {len(articles)}개 기사 수집 완료")
 
-    print("\n2. 키워드 우선순위 필터링 (최대 5개 선별)...")
+    print("\n2. 키워드 우선순위 최대 5개 기사 선별...")
     selected_top5 = filter_and_select_top5(articles, keywords)
+    print(f"   -> {len(selected_top5)}개 기사 선별 완료")
 
-    # 3. Gemini AI 일괄 요약 생성
-    if api_key:
-        print("\n3. 🤖 Gemini AI를 활용한 5개 기사 핵심 요약 생성 중...")
-        summarize_all_with_gemini(api_key, selected_top5)
-    else:
-        for art in selected_top5:
-            art["ai_summary"] = art["description"]
+    # 4. 각 기사별 세 줄 요약 생성
+    print("\n3. 기사별 Gemini 세 줄 요약 생성 중...")
+    for idx, art in enumerate(selected_top5, start=1):
+        print(f"   [{idx}/{len(selected_top5)}] 요약 생성 중: {art['title'][:30]}...")
+        three_lines = summarize_with_gemini(api_key, art["title"], art["description"])
+        art["three_line_summary"] = three_lines
 
+    # 5. 결과 파일 생성 (index.html 및 news.json)
     print("\n4. 결과 파일 생성 중...")
-    # 4-1. news.json 저장
+
+    # index.html 생성
+    generate_index_html(html_path, selected_top5, collected_time_str)
+    print(f"   -> [HTML] {html_path.name} 생성 완료 (제목: '금융·경제 아침 브리핑')")
+
+    # news.json 생성
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(selected_top5, f, indent=2, ensure_ascii=False)
     print(f"   -> [JSON] {json_path.name} 저장 완료")
 
-    # 4-2. briefing.md 저장
-    save_markdown_report(md_path, keywords, selected_top5)
-    print(f"   -> [Markdown] {md_path.name} 저장 완료")
-
-    # 4-3. index.html 저장
-    save_html_dashboard(html_path, keywords, selected_top5)
-    print(f"   -> [HTML] {html_path.name} 저장 완료")
-
     print("\n" + "=" * 60)
-    print("🎉 뉴스 브리핑 & AI 요약이 성공적으로 완료되었습니다!")
+    print("🎉 금융·경제 아침 브리핑 생성이 성공적으로 완료되었습니다!")
+    print(f"👉 파일 열기: {html_path.resolve()}")
     print("=" * 60)
 
 
