@@ -1,0 +1,29 @@
+{
+  "keywords": [
+    "금융",
+    "경제",
+    "ai"
+  ],
+  "feeds": [
+    {
+      "name": "한국경제 경제",
+      "url": "https://www.hankyung.com/feed/economy"
+    },
+    {
+      "name": "매일경제 경제",
+      "url": "https://www.mk.co.kr/rss/30100041/"
+    },
+    {
+      "name": "서울경제 경제",
+      "url": "https://www.sedaily.com/rss/economy"
+    },
+    {
+      "name": "경향신문 경제",
+      "url": "https://www.khan.co.kr/rss/rssdata/economy_news.xml"
+    },
+    {
+      "name": "아주경제 경제",
+      "url": "https://www.ajunews.com/rss/economy.xml"
+    }
+  ]
+}
