@@ -1,7 +1,8 @@
 """
 [briefing.py]
 settings.json에 등록된 RSS 피드에서 뉴스를 수집하고,
-Gemini API를 호출하여 각 기사마다 '세 줄 요약'을 생성한 뒤
+선별된 기사의 실제 웹페이지 원문(본문)을 스크래핑한 뒤,
+Gemini API를 통해 원문 기반의 충실한 '세 줄 요약'을 생성하여
 index.html 및 news.json 결과물을 생성하는 스크립트입니다.
 
 외부 패키지 설치 없이 Python 기본 내장 모듈만 사용합니다.
@@ -13,6 +14,7 @@ import html
 import json
 import os
 from pathlib import Path
+import re
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -20,21 +22,28 @@ import xml.etree.ElementTree as ET
 
 def load_env_api_key(env_path: Path) -> str:
     """
-    외부 라이브러리(python-dotenv) 없이 파이썬 기본 기능으로
-    .env 파일에서 GEMINI_API_KEY를 안전하게 읽어옵니다.
+    1) 시스템 환경변수(GitHub Actions Secrets 등)를 우선 확인하고,
+    2) 없으면 .env 파일에서 GEMINI_API_KEY를 안전하게 읽어옵니다.
+    외부 라이브러리(python-dotenv) 없이 파이썬 기본 기능만 사용합니다.
     """
-    if not env_path.exists():
-        return os.environ.get("GEMINI_API_KEY", "")
+    # 1. 환경변수 확인
+    env_val = os.environ.get("GEMINI_API_KEY", "").strip()
+    if env_val:
+        return env_val
 
-    try:
-        with open(env_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("GEMINI_API_KEY="):
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
-    except Exception:
-        pass
-    return os.environ.get("GEMINI_API_KEY", "")
+    # 2. .env 파일 확인
+    if env_path.exists():
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("GEMINI_API_KEY="):
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            return val
+        except Exception:
+            pass
+    return ""
 
 
 def parse_pubdate(pubdate_str: str) -> tuple[datetime, str]:
@@ -53,10 +62,46 @@ def parse_pubdate(pubdate_str: str) -> tuple[datetime, str]:
         return datetime.min, pubdate_str
 
 
+def is_hankyung_premium(source: str = "", title: str = "", link: str = "", category: str = "") -> bool:
+    """
+    한국경제 기사 중 유료 구독 서비스인 '한경 프리미엄 / 프리미엄9' 기사인지 판별합니다.
+    유료 기사는 로그인 및 구독 권한이 필요해 원문 확인(스크래핑)이 불가능하므로 수집에서 제외합니다.
+    (일반 한국경제 기본 기사는 정상 수집됩니다.)
+    """
+    is_hk = ("한국경제" in source) or ("hankyung.com" in link)
+    if not is_hk:
+        return False
+
+    # 1. URL 경로 확인 (/premium9, /premium 등)
+    lower_link = link.lower()
+    if "/premium9" in lower_link or "/premium" in lower_link:
+        return True
+
+    # 2. 제목 내 프리미엄 관련 키워드 확인
+    lower_title = title.lower()
+    premium_title_keywords = [
+        "프리미엄9", "프리미엄 9", "한경 프리미엄", "한경프리미엄",
+        "[프리미엄]", "[한경 프리미엄9]", "[프리미엄9]",
+        "한경 exclusive", "한경exclusive", "[한경 exclusive]",
+        "epic ai", "에픽 ai"
+    ]
+    for kw in premium_title_keywords:
+        if kw in lower_title:
+            return True
+
+    # 3. RSS 카테고리 태그 확인
+    lower_cat = category.lower()
+    if "프리미엄" in lower_cat or "premium" in lower_cat:
+        return True
+
+    return False
+
+
 def fetch_all_articles(settings: dict) -> list[dict]:
     """
     settings.json의 모든 RSS 피드에서 기사 목록을 수집합니다.
-    (기사 본문 웹페이지는 스크래핑하지 않고 RSS 피드 정보만 사용)
+    - [포토] 기사는 제외합니다.
+    - 한국경제 유료 기사(한경 프리미엄9)는 원문 확인 불가로 제외합니다.
     """
     feeds = settings.get("feeds", [])
     headers = {
@@ -86,9 +131,14 @@ def fetch_all_articles(settings: dict) -> list[dict]:
                 link = item.findtext("link", default="").strip()
                 description = item.findtext("description", default="").strip()
                 pub_date_raw = item.findtext("pubDate", default="").strip()
+                category = item.findtext("category", default="").strip()
 
                 # 기사 제목 중에 [포토] 들어간 기사는 제외
                 if "[포토]" in title:
+                    continue
+
+                # 한국경제 프리미엄9 유료 기사 제외 (원문 확인 불가)
+                if is_hankyung_premium(feed_name, title, link, category):
                     continue
 
                 if not link or link in seen_links:
@@ -154,67 +204,231 @@ def filter_and_select_top5(articles: list[dict], keywords: list[str]) -> list[di
     return clean_results
 
 
-def summarize_with_gemini(api_key: str, title: str, description: str) -> str:
+def fetch_article_content(url: str, fallback_desc: str = "", timeout: int = 10) -> str:
     """
-    지정된 요약 프롬프트 규칙에 따라 Gemini로 세 줄 요약을 생성합니다.
-    - '자세한 내용은 원문 확인 필요' 문구는 포함하지 않습니다.
-    - API 키가 없거나 실패하더라도 안전한 대체 텍스트를 반환합니다.
+    기사 링크(URL)에 직접 접속하여 웹페이지 본문 텍스트(원문)를 추출합니다.
+    외부 라이브러리(BeautifulSoup 등) 설치 없이 파이썬 기본 표준 라이브러리(urllib, re, html)만 사용합니다.
+    본문 추출 실패 시 RSS 소개문(fallback_desc)을 반환합니다.
     """
-    # 1. API 키가 없는 경우
-    if not api_key:
-        fallback = [
-            f"- {title}",
-            f"- {description[:60]}..." if description else "- 기사 내용 요약 준비 중입니다.",
-            "- 금융·경제 관련 주요 뉴스입니다."
-        ]
-        return "\n".join(fallback)
+    if not url or not url.startswith("http"):
+        return fallback_desc
 
-    # 2. Gemini 요청 프롬프트 구성
-    clean_desc = description.strip() if description else "소개문 내용 없음"
-    prompt = (
-        "아래 기사 정보만 보고 한국어로 핵심 내용을 세 줄 요약해 줘.\n"
-        "- 각 줄은 한 문장이어야 하며, 줄 앞에 반드시 \"- \" 를 붙인다\n"
-        "- 기사 정보에 없는 내용, 숫자, 이름은 절대 추측하거나 지어내지 않는다\n"
-        "- '자세한 내용은 원문 확인 필요' 같은 메타 문구는 절대 쓰지 말고, 기사 내용의 핵심만을 작성한다\n\n"
-        f"[기사 정보]\n"
-        f"제목: {title}\n"
-        f"소개문: {clean_desc}"
-    )
+    # 한국경제 프리미엄9 유료 기사는 스크래핑 건너뛰기
+    if is_hankyung_premium("", "", url):
+        return fallback_desc
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={api_key}"
-
-    payload = {
-        "contents": [
-            {"parts": [{"text": prompt}]}
-        ]
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
     }
 
-    # 3. HTTP 요청 및 응답 처리
     try:
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=15) as response:
-            res_data = json.loads(response.read().decode("utf-8"))
-            summary_text = res_data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            content_type = resp.headers.get("content-type", "")
+            raw_data = resp.read()
 
-            # '원문 확인 필요' 문구가 혹시라도 포함되어 있으면 제거
-            filtered_lines = [
-                line for line in summary_text.split("\n")
-                if "원문 확인 필요" not in line and line.strip()
-            ]
-            return "\n".join(filtered_lines)
+        # 인코딩 확인
+        encoding = "utf-8"
+        if "charset=" in content_type.lower():
+            encoding = content_type.lower().split("charset=")[-1].split(";")[0].strip()
+
+        try:
+            html_text = raw_data.decode(encoding)
+        except Exception:
+            try:
+                html_text = raw_data.decode("cp949")
+            except Exception:
+                html_text = raw_data.decode("utf-8", errors="ignore")
+
+        # 1. 불필요한 태그 및 주석 제거
+        cleaned = re.sub(r"<(script|style|head|nav|footer|header|iframe|aside)[^>]*>.*?</\1>", " ", html_text, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r"<!--.*?-->", " ", cleaned, flags=re.DOTALL)
+
+        # 2. 언론사별 주요 본문 영역 추출
+        body_html = ""
+        # 한국경제 (hankyung.com)
+        if "hankyung.com" in url:
+            m = re.search(r'<div[^>]+id=["\']articletxt["\'][^>]*>(.*?)</div>', cleaned, flags=re.DOTALL | re.IGNORECASE)
+            if m:
+                body_html = m.group(1)
+        # 매일경제 (mk.co.kr)
+        elif "mk.co.kr" in url:
+            m = re.search(r'<div[^>]+class=["\'][^"\']*news_cnt_detail_wrap[^"\']*["\'][^>]*>(.*?)</div>', cleaned, flags=re.DOTALL | re.IGNORECASE)
+            if not m:
+                m = re.search(r'<div[^>]+id=["\']article_body["\'][^>]*>(.*?)</div>', cleaned, flags=re.DOTALL | re.IGNORECASE)
+            if m:
+                body_html = m.group(1)
+
+        # 3. 범용 본문 컨테이너 검색
+        if not body_html:
+            m = re.search(r'<article[^>]*>(.*?)</article>', cleaned, flags=re.DOTALL | re.IGNORECASE)
+            if m:
+                body_html = m.group(1)
+            else:
+                m = re.search(r'<div[^>]+(?:class|id)=["\'][^"\']*(?:article|content|view_text|news_body)[^"\']*["\'][^>]*>(.*?)</div>', cleaned, flags=re.DOTALL | re.IGNORECASE)
+                if m:
+                    body_html = m.group(1)
+
+        # 4. 그래도 없으면 <p> 태그 모음 추출
+        if not body_html:
+            p_list = re.findall(r'<p[^>]*>(.*?)</p>', cleaned, flags=re.DOTALL | re.IGNORECASE)
+            body_html = " ".join(p_list)
+
+        # 5. 모든 HTML 태그 제거 및 텍스트 디코딩
+        raw_text = re.sub(r'<[^>]+>', ' ', body_html)
+        raw_text = html.unescape(raw_text)
+
+        # 6. 노이즈 문구(기자 이메일, 저작권, 바이라인 등) 정리
+        lines = []
+        for line in raw_text.splitlines():
+            line = re.sub(r'\s+', ' ', line).strip()
+            # 15자 미만의 짧은 텍스트(캡션, 메뉴, 광고 등) 제외
+            if len(line) < 15:
+                continue
+            # 기자 이메일, 저작권, 무단전재 등 필터링
+            if re.search(r'(@|ⓒ|저작권자|무단전재|재배포|기자\s*=|기자\s*$)', line):
+                continue
+            lines.append(line)
+
+        article_content = "\n".join(lines).strip()
+
+        # 만약 본문이 50자 미만으로 부실하면 fallback_desc 활용
+        if len(article_content) < 50:
+            return fallback_desc if fallback_desc else article_content
+
+        # 본문이 너무 길면 상위 2500자 (충분한 정보 + 초고속 API 처리)
+        return article_content[:2500]
+
     except Exception as e:
-        print(f"      ⚠️ 요약 실패 ({e}): 기본 내용으로 대체합니다.")
-        fallback = [
-            f"- {title}",
-            f"- {clean_desc[:60]}..." if clean_desc != "소개문 내용 없음" else "- 기사 상세 내용입니다.",
-            "- 금융 및 경제 분야 소식입니다."
-        ]
-        return "\n".join(fallback)
+        print(f"      ⚠️ 본문 스크래핑 실패 ({url}): {e}")
+        return fallback_desc
+
+
+def create_text_fallback_summary(title: str, content: str) -> str:
+    """
+    API 키가 없거나 호출 실패 시 기사 본문(원문)에서 실제 문장을 추출하여
+    '금융·경제 관련 주요 뉴스입니다' 같은 무의미한 상투어 없이 3줄을 구성합니다.
+    """
+    if not content:
+        return f"- {title}"
+
+    # 문장 단위로 분리 (온점, 느낌표, 물음표 기준)
+    sentences = re.split(r'(?<=[.?!])\s+', content)
+    meaningful = [
+        s.strip() for s in sentences
+        if len(s.strip()) >= 20 and not re.search(r'(@|기자|ⓒ|무단전재)', s)
+    ]
+
+    result = []
+    # 첫째 줄은 제목을 기반으로 정제
+    result.append(f"- {title}")
+
+    # 둘째, 셋째 줄은 본문에서 추출한 실제 기사 문장으로 채움
+    for s in meaningful:
+        if s[:20] in title or title[:20] in s:
+            continue
+        display_s = s[:100] + "..." if len(s) > 100 else s
+        result.append(f"- {display_s}")
+        if len(result) >= 3:
+            break
+
+    # 만약 문장이 1개뿐이었다면 남은 문장으로 채움
+    if len(result) < 3 and content:
+        for s in sentences:
+            s_clean = s.strip()
+            if s_clean and f"- {s_clean}" not in result:
+                result.append(f"- {s_clean[:100]}")
+                if len(result) >= 3:
+                    break
+
+    return "\n".join(result[:3])
+
+
+def summarize_with_gemini(api_key: str, title: str, content: str) -> str:
+    """
+    기사 원문(본문 텍스트)을 기반으로 Gemini를 호출하여 핵심 세 줄 요약을 생성합니다.
+    - 상투적인 문구('금융·경제 관련 주요 뉴스입니다', '원문 확인 필요' 등)를 절대 배제하고
+    - 기사의 실제 원문에 담긴 핵심 사실, 수치, 배경, 영향을 3문장으로 요약합니다.
+    """
+    clean_content = content.strip() if content else ""
+
+    # 1. API 키가 없거나 비어있는 경우 -> 기사 원문 기반 실제 문장 3줄 fallback 생성
+    if not api_key:
+        return create_text_fallback_summary(title, clean_content)
+
+    # 2. Gemini 프롬프트 구성 (원문 기반 핵심 3줄 요약)
+    prompt = (
+        "너는 전문 금융·경제 뉴스 에디터야. 아래 제공된 [기사 원문]을 꼼꼼히 읽고 원문의 핵심 내용을 바탕으로 한국어로 충실한 3줄 요약을 작성해 줘.\n\n"
+        "[작성 규칙]\n"
+        "1. 정확히 3개의 줄로 작성하고, 각 줄은 반드시 '- ' 로 시작할 것.\n"
+        "2. 3줄은 각각 다음 핵심 관점을 다룰 것:\n"
+        "   - 첫째 줄: 핵심 사건이나 발표 내용 (무엇이 일어났는가?)\n"
+        "   - 둘째 줄: 구체적인 배경, 원인 또는 핵심 수치/사실 (왜, 구체적으로 어떤 내용인가?)\n"
+        "   - 셋째 줄: 시장·업계에 미칠 영향이나 향후 전망 (앞으로 어떻게 되는가?)\n"
+        "3. 절대로 '금융·경제 관련 주요 뉴스입니다', '자세한 내용은 원문 확인 필요', '기사 내용에 따르면' 같은 무의미한 상투어나 메타 설명, 빈말을 쓰지 말 것.\n"
+        "4. 오직 [기사 원문]에 실제로 존재하는 구체적인 사실, 수치, 내용만을 기반으로 3줄을 알차게 꽉 채울 것.\n\n"
+        f"[기사 제목]\n{title}\n\n"
+        f"[기사 원문]\n{clean_content if clean_content else title}"
+    )
+
+    models = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-3.1-flash-lite"
+    ]
+
+    for model_name in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        payload = {
+            "contents": [
+                {"parts": [{"text": prompt}]}
+            ],
+            "generationConfig": {
+                "temperature": 0.2
+            }
+        }
+
+        try:
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=15) as response:
+                res_data = json.loads(response.read().decode("utf-8"))
+                summary_text = res_data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+                lines = [line.strip() for line in summary_text.splitlines() if line.strip()]
+                # '- ' 로 시작하지 않는 줄이 있으면 붙여주기
+                formatted_lines = [l if l.startswith("- ") else f"- {l}" for l in lines]
+
+                # 상투어 필터링
+                clean_lines = [
+                    l for l in formatted_lines
+                    if "원문 확인 필요" not in l and "주요 뉴스입니다" not in l and "주요 소식입니다" not in l
+                ]
+
+                if len(clean_lines) >= 3:
+                    return "\n".join(clean_lines[:3])
+                elif len(clean_lines) >= 1:
+                    return "\n".join(clean_lines)
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 400):
+                continue
+            print(f"      ⚠️ Gemini 호출 에러 ({model_name}, HTTP {e.code}): {e}")
+        except Exception as e:
+            print(f"      ⚠️ 요약 실패 ({model_name}): {e}")
+
+    # 모든 모델 호출 실패 시 원문 기반 자연스러운 fallback 생성
+    return create_text_fallback_summary(title, clean_content)
 
 
 def generate_index_html(output_path: Path, articles: list[dict], collected_time_str: str):
@@ -497,11 +711,15 @@ def main():
     selected_top5 = filter_and_select_top5(articles, keywords)
     print(f"   -> {len(selected_top5)}개 기사 선별 완료")
 
-    # 4. 각 기사별 세 줄 요약 생성
-    print("\n3. 기사별 Gemini 세 줄 요약 생성 중...")
+    # 4. 각 기사별 원문 수집 및 세 줄 요약 생성
+    print("\n3. 기사별 원문 수집 및 Gemini 세 줄 요약 생성 중...")
     for idx, art in enumerate(selected_top5, start=1):
-        print(f"   [{idx}/{len(selected_top5)}] 요약 생성 중: {art['title'][:30]}...")
-        three_lines = summarize_with_gemini(api_key, art["title"], art["description"])
+        print(f"   [{idx}/{len(selected_top5)}] 원문 수집 중: {art['title'][:30]}...")
+        content = fetch_article_content(art["link"], fallback_desc=art["description"])
+        art["content"] = content
+
+        print(f"   [{idx}/{len(selected_top5)}] 3줄 요약 생성 중...")
+        three_lines = summarize_with_gemini(api_key, art["title"], content)
         art["three_line_summary"] = three_lines
 
     # 5. 결과 파일 생성 (index.html 및 news.json)
