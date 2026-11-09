@@ -250,20 +250,25 @@ def fetch_article_content(url: str, fallback_desc: str = "", timeout: int = 10) 
         cleaned = re.sub(r"<(script|style|head|nav|footer|header|iframe|aside)[^>]*>.*?</\1>", " ", html_text, flags=re.DOTALL | re.IGNORECASE)
         cleaned = re.sub(r"<!--.*?-->", " ", cleaned, flags=re.DOTALL)
 
-        # 2. 언론사별 주요 본문 영역 추출
+        # 2. 언론사별 주요 본문 영역 추출 (중첩 태그 안전 대응)
         body_html = ""
         # 한국경제 (hankyung.com)
         if "hankyung.com" in url:
-            m = re.search(r'<div[^>]+id=["\']articletxt["\'][^>]*>(.*?)</div>', cleaned, flags=re.DOTALL | re.IGNORECASE)
+            m = re.search(r'<div[^>]+id=["\']articletxt["\'][^>]*>', cleaned, re.IGNORECASE)
             if m:
-                body_html = m.group(1)
+                start_pos = m.end()
+                end_match = re.search(r'(<div[^>]+class=["\'][^"\']*(?:article-copyright|article-byline|article-extra|article-recirculation)|</article>)', cleaned[start_pos:], re.IGNORECASE)
+                body_html = cleaned[start_pos:start_pos + end_match.start()] if end_match else cleaned[start_pos:start_pos + 4000]
+
         # 매일경제 (mk.co.kr)
         elif "mk.co.kr" in url:
-            m = re.search(r'<div[^>]+class=["\'][^"\']*news_cnt_detail_wrap[^"\']*["\'][^>]*>(.*?)</div>', cleaned, flags=re.DOTALL | re.IGNORECASE)
+            m = re.search(r'<div[^>]+class=["\'][^"\']*news_cnt_detail_wrap[^"\']*["\'][^>]*>', cleaned, re.IGNORECASE)
             if not m:
-                m = re.search(r'<div[^>]+id=["\']article_body["\'][^>]*>(.*?)</div>', cleaned, flags=re.DOTALL | re.IGNORECASE)
+                m = re.search(r'<div[^>]+id=["\']article_body["\'][^>]*>', cleaned, re.IGNORECASE)
             if m:
-                body_html = m.group(1)
+                start_pos = m.end()
+                end_match = re.search(r'(<div[^>]+class=["\'][^"\']*(?:art_copyright|byline_wrap|news_btn_bottom|related_news)|</article>)', cleaned[start_pos:], re.IGNORECASE)
+                body_html = cleaned[start_pos:start_pos + end_match.start()] if end_match else cleaned[start_pos:start_pos + 4000]
 
         # 3. 범용 본문 컨테이너 검색
         if not body_html:
@@ -271,30 +276,24 @@ def fetch_article_content(url: str, fallback_desc: str = "", timeout: int = 10) 
             if m:
                 body_html = m.group(1)
             else:
-                m = re.search(r'<div[^>]+(?:class|id)=["\'][^"\']*(?:article|content|view_text|news_body)[^"\']*["\'][^>]*>(.*?)</div>', cleaned, flags=re.DOTALL | re.IGNORECASE)
-                if m:
-                    body_html = m.group(1)
+                p_list = re.findall(r'<p[^>]*>(.*?)</p>', cleaned, flags=re.DOTALL | re.IGNORECASE)
+                body_html = " ".join(p_list)
 
-        # 4. 그래도 없으면 <p> 태그 모음 추출
-        if not body_html:
-            p_list = re.findall(r'<p[^>]*>(.*?)</p>', cleaned, flags=re.DOTALL | re.IGNORECASE)
-            body_html = " ".join(p_list)
-
-        # 5. 모든 HTML 태그 제거 및 텍스트 디코딩
+        # 4. 줄바꿈 보존 및 태그 제거
+        body_html = re.sub(r'<(?:br|/p|/div|/li)[^>]*>', '\n', body_html, flags=re.IGNORECASE)
         raw_text = re.sub(r'<[^>]+>', ' ', body_html)
         raw_text = html.unescape(raw_text)
 
-        # 6. 노이즈 문구(기자 이메일, 저작권, 바이라인 등) 정리
+        # 5. 이메일, 기자 이름, 저작권 문구만 부분 정제 (전체 줄이 삭제되지 않도록)
+        raw_text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '', raw_text)
+        raw_text = re.sub(r'[가-힣]{2,4}\s*기자(?:\s*=[^,\n]*)?', '', raw_text)
+        raw_text = re.sub(r'(?:ⓒ|저작권자|무단전재|재배포|무단 전재).*', '', raw_text)
+
         lines = []
         for line in raw_text.splitlines():
             line = re.sub(r'\s+', ' ', line).strip()
-            # 15자 미만의 짧은 텍스트(캡션, 메뉴, 광고 등) 제외
-            if len(line) < 15:
-                continue
-            # 기자 이메일, 저작권, 무단전재 등 필터링
-            if re.search(r'(@|ⓒ|저작권자|무단전재|재배포|기자\s*=|기자\s*$)', line):
-                continue
-            lines.append(line)
+            if len(line) >= 15:
+                lines.append(line)
 
         article_content = "\n".join(lines).strip()
 
@@ -372,15 +371,16 @@ def summarize_with_gemini(api_key: str, title: str, content: str) -> str:
         "   - 둘째 줄: 구체적인 배경, 원인 또는 핵심 수치/사실 (왜, 구체적으로 어떤 내용인가?)\n"
         "   - 셋째 줄: 시장·업계에 미칠 영향이나 향후 전망 (앞으로 어떻게 되는가?)\n"
         "3. 절대로 '금융·경제 관련 주요 뉴스입니다', '자세한 내용은 원문 확인 필요', '기사 내용에 따르면' 같은 무의미한 상투어나 메타 설명, 빈말을 쓰지 말 것.\n"
-        "4. 오직 [기사 원문]에 실제로 존재하는 구체적인 사실, 수치, 내용만을 기반으로 3줄을 알차게 꽉 채울 것.\n\n"
+        "4. '제공해주신 기사 원문이...', '요약해 드립니다', '작성하였습니다' 등 AI 자신이나 지시사항에 대해 언급하는 사족이나 메타 발언을 절대 하지 말고, 3줄 모두 순수 기사 핵심 사실만 작성할 것.\n"
+        "5. 오직 [기사 원문]에 실제로 존재하는 구체적인 사실, 수치, 내용만을 기반으로 3줄을 알차게 꽉 채울 것.\n\n"
         f"[기사 제목]\n{title}\n\n"
         f"[기사 원문]\n{clean_content if clean_content else title}"
     )
 
     models = [
-        "gemini-2.5-flash",
         "gemini-2.0-flash",
         "gemini-1.5-flash",
+        "gemini-2.5-flash",
         "gemini-3.1-flash-lite"
     ]
 
@@ -402,7 +402,7 @@ def summarize_with_gemini(api_key: str, title: str, content: str) -> str:
                 data=data,
                 headers={"Content-Type": "application/json"}
             )
-            with urllib.request.urlopen(req, timeout=15) as response:
+            with urllib.request.urlopen(req, timeout=25) as response:
                 res_data = json.loads(response.read().decode("utf-8"))
                 summary_text = res_data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
@@ -410,10 +410,11 @@ def summarize_with_gemini(api_key: str, title: str, content: str) -> str:
                 # '- ' 로 시작하지 않는 줄이 있으면 붙여주기
                 formatted_lines = [l if l.startswith("- ") else f"- {l}" for l in lines]
 
-                # 상투어 필터링
+                # 상투어 및 메타 사족 필터링
+                meta_patterns = ["원문 확인 필요", "주요 뉴스입니다", "주요 소식입니다", "제공해주신", "원문이 제목", "요약해 드립니다", "작성하였습니다"]
                 clean_lines = [
                     l for l in formatted_lines
-                    if "원문 확인 필요" not in l and "주요 뉴스입니다" not in l and "주요 소식입니다" not in l
+                    if not any(pat in l for pat in meta_patterns)
                 ]
 
                 if len(clean_lines) >= 3:
