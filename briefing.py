@@ -204,6 +204,24 @@ def filter_and_select_top5(articles: list[dict], keywords: list[str]) -> list[di
     return clean_results
 
 
+# 기사 본문이 아닌 페이지 잡문구(입력/수정 시각, 구독·검색 안내 등) 판별
+BOILERPLATE_PATTERNS = [
+    r"^(입력|수정|등록|최종\s*수정|업데이트|발행)\s*[:：]?\s*\d{4}[.\-/]",
+    r"^\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}\.?\s*\d{1,2}:\d{2}",
+    r"구글\s*검색|Google\s*검색|선호\s*출처",
+    r"구독|좋아요|공유하기|기사\s*스크랩|글자\s*크기|프린트|댓글",
+    r"무단\s*전재|재배포|저작권|ⓒ|Copyright",
+    r"^사진\s*=|^\[?사진|^그래픽\s*=|^자료\s*=",
+]
+
+
+def is_boilerplate_line(line: str) -> bool:
+    text = line.strip()
+    if not text:
+        return True
+    return any(re.search(pat, text, re.IGNORECASE) for pat in BOILERPLATE_PATTERNS)
+
+
 def fetch_article_content(url: str, fallback_desc: str = "", timeout: int = 10) -> str:
     """
     기사 링크(URL)에 직접 접속하여 웹페이지 본문 텍스트(원문)를 추출합니다.
@@ -292,7 +310,7 @@ def fetch_article_content(url: str, fallback_desc: str = "", timeout: int = 10) 
         lines = []
         for line in raw_text.splitlines():
             line = re.sub(r'\s+', ' ', line).strip()
-            if len(line) >= 15:
+            if len(line) >= 15 and not is_boilerplate_line(line):
                 lines.append(line)
 
         article_content = "\n".join(lines).strip()
@@ -317,36 +335,40 @@ def create_text_fallback_summary(title: str, content: str) -> str:
     if not content:
         return f"- {title}"
 
-    # 문장 단위로 분리 (온점, 느낌표, 물음표 기준)
-    sentences = re.split(r'(?<=[.?!])\s+', content)
-    meaningful = [
-        s.strip() for s in sentences
-        if len(s.strip()) >= 20 and not re.search(r'(@|기자|ⓒ|무단전재)', s)
+    # 잡문구 줄(입력/수정 시각, 검색·구독 안내 등)을 먼저 걸러낸 뒤
+    # 한 덩어리로 합쳐서 문장 단위로 분리 (한 줄 안에 줄바꿈이 섞이지 않도록)
+    # 문장부호로 끝나지 않는 줄(부제목, 소제목)은 본문 문장이 아니므로 제외
+    body_lines = [
+        l.strip() for l in content.splitlines()
+        if not is_boilerplate_line(l) and re.search(r"[.?!\"'”’]$", l.strip())
     ]
+    if not body_lines:
+        body_lines = [l.strip() for l in content.splitlines() if not is_boilerplate_line(l)]
+    body = re.sub(r"\s+", " ", " ".join(body_lines)).strip()
+    # 문장 앞의 <연합뉴스>, [사진] 같은 출처 표기 제거
+    body = re.sub(r"(^|\s)[<\[][^>\]]{1,15}[>\]]\s*", r"\1", body)
+    sentences = re.split(r"(?<=[.?!])\s+", body)
 
-    result = []
-    # 첫째 줄은 제목을 기반으로 정제
-    result.append(f"- {title}")
-
-    # 둘째, 셋째 줄은 본문에서 추출한 실제 기사 문장으로 채움
-    for s in meaningful:
-        if s[:20] in title or title[:20] in s:
+    title_key = re.sub(r"\s+", "", title)[:15]
+    picked = []
+    for sent in sentences:
+        sent = sent.strip()
+        if len(sent) < 25 or is_boilerplate_line(sent):
             continue
-        display_s = s[:100] + "..." if len(s) > 100 else s
-        result.append(f"- {display_s}")
-        if len(result) >= 3:
+        if re.search(r"(@|기자\s*=|ⓒ)", sent):
+            continue
+        # 제목을 그대로 반복하는 문장은 제외
+        if title_key and title_key in re.sub(r"\s+", "", sent):
+            continue
+        if len(sent) > 120:
+            sent = sent[:118].rstrip() + "…"
+        picked.append(f"- {sent}")
+        if len(picked) >= 3:
             break
 
-    # 만약 문장이 1개뿐이었다면 남은 문장으로 채움
-    if len(result) < 3 and content:
-        for s in sentences:
-            s_clean = s.strip()
-            if s_clean and f"- {s_clean}" not in result:
-                result.append(f"- {s_clean[:100]}")
-                if len(result) >= 3:
-                    break
-
-    return "\n".join(result[:3])
+    if not picked:
+        return f"- {title}"
+    return "\n".join(picked)
 
 
 def summarize_with_gemini(api_key: str, title: str, content: str) -> str:
